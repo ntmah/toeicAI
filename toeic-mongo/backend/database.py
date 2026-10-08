@@ -35,6 +35,7 @@ def users_col():    return get_db()["users"]
 def stats_col():    return get_db()["user_stats"]
 def sessions_col(): return get_db()["quiz_sessions"]
 def vocab_col():    return get_db()["vocab_history"]
+def flashcards_col(): return get_db()["flashcards"]
 
 
 # ── Tạo indexes khi app khởi động ────────────────────────────────
@@ -60,6 +61,11 @@ async def create_indexes():
 
     # vocab_history: query theo user
     await vocab_col().create_indexes([
+        IndexModel([("user_id", ASCENDING), ("created_at", DESCENDING)]),
+    ])
+
+    # flashcards: query theo user, sort theo thời gian
+    await flashcards_col().create_indexes([
         IndexModel([("user_id", ASCENDING), ("created_at", DESCENDING)]),
     ])
 

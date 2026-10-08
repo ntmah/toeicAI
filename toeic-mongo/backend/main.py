@@ -7,7 +7,8 @@ import os, uuid
 from datetime import datetime, timezone
 from typing import Dict, Optional, List
 
-from fastapi import FastAPI, HTTPException, Depends
+
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
 from dotenv import load_dotenv
@@ -19,9 +20,9 @@ os.environ.setdefault("LANGCHAIN_TRACING_V2", os.getenv("LANGCHAIN_TRACING_V2", 
 os.environ.setdefault("LANGCHAIN_PROJECT",    os.getenv("LANGCHAIN_PROJECT", "toeic-ai-agent"))
 os.environ.setdefault("LANGCHAIN_API_KEY",    os.getenv("LANGCHAIN_API_KEY", ""))
 
-from database import create_indexes, users_col, stats_col, sessions_col, vocab_col
+from database import create_indexes, users_col, stats_col, sessions_col, vocab_col, flashcards_col
 from auth import hash_password, verify_password, create_token, get_current_user, require_user
-from chains import run_agent_analyze, run_session_analysis, run_tutor_chat, run_poem_generator
+from chains import run_agent_analyze, run_session_analysis, run_tutor_chat, run_poem_generator, run_flashcard_generator, run_agent_generate
 
 app = FastAPI(title="TOEIC AI Agent", version="3.0-mongo")
 
@@ -73,6 +74,15 @@ class StatsReq(BaseModel):
     done: int
     correct: int
 
+class FlashCard(BaseModel):
+    word: str
+    part_of_speech: Optional[str] = ""
+    ipa: Optional[str] = ""
+    meaning: Optional[str] = ""
+
+class FlashcardDeck(BaseModel):
+    cards: List[FlashCard]
+    deck_name: str
 
 # ── Health ────────────────────────────────────────────────────────
 @app.get("/api/health")
@@ -181,30 +191,90 @@ async def upsert_stats(req: StatsReq, user=Depends(require_user)):
 
 # ══ AGENT ════════════════════════════════════════════════════════
 
+# @app.post("/api/agent/analyze")
+# async def agent_analyze(req: AnalyzeReq, user=Depends(get_current_user)):
+#     """Agent phân tích điểm yếu → LangSmith: agent_analyze"""
+#     stats = req.stats
+#     labels = {"reading":"Reading","grammar":"Grammar","vocab":"Vocabulary","listening":"Listening"}
+#     with_data = [m for m in stats if stats[m].get("done", 0) > 0]
+
+#     if not with_data:
+#         return {"message": "Hãy làm bài để Agent theo dõi điểm yếu và đề xuất lộ trình!", "weakest": None}
+
+#     summary = ", ".join(
+#         f"{labels[m]}: {round(stats[m]['correct']/stats[m]['done']*100)}% ({stats[m]['done']} câu)"
+#         for m in with_data
+#     )
+#     weakest = min(with_data, key=lambda m: stats[m]["correct"] / stats[m]["done"])
+
+#     try:
+#         message = await run_agent_analyze(summary)
+#     except Exception:
+#         acc = round(stats[weakest]["correct"] / stats[weakest]["done"] * 100)
+#         message = f"Bạn đang yếu nhất ở {labels[weakest]} ({acc}%). Hãy luyện thêm!"
+
+#     return {"message": message, "weakest": weakest}
+
+class AnalyzeReq(BaseModel):
+    stats: dict
+
 @app.post("/api/agent/analyze")
-async def agent_analyze(req: AnalyzeReq, user=Depends(get_current_user)):
-    """Agent phân tích điểm yếu → LangSmith: agent_analyze"""
+async def agent_analyze_endpoint(req: AnalyzeReq):
+    """API: Gọi khi load HomeTab để lấy lời khuyên"""
     stats = req.stats
-    labels = {"reading":"Reading","grammar":"Grammar","vocab":"Vocabulary","listening":"Listening"}
+    labels = {"reading":"Reading", "grammar":"Grammar", "vocab":"Vocabulary", "listening":"Listening"}
     with_data = [m for m in stats if stats[m].get("done", 0) > 0]
 
     if not with_data:
-        return {"message": "Hãy làm bài để Agent theo dõi điểm yếu và đề xuất lộ trình!", "weakest": None}
+        return {"message": "Hãy làm bài test ban đầu để Agent theo dõi và đề xuất lộ trình!", "weakest": None}
 
     summary = ", ".join(
-        f"{labels[m]}: {round(stats[m]['correct']/stats[m]['done']*100)}% ({stats[m]['done']} câu)"
+        f"{labels.get(m, m)}: {round(stats[m]['correct']/stats[m]['done']*100)}% ({stats[m]['done']} câu)"
         for m in with_data
     )
     weakest = min(with_data, key=lambda m: stats[m]["correct"] / stats[m]["done"])
 
     try:
         message = await run_agent_analyze(summary)
-    except Exception:
+    except Exception as e:
+        print(f"Lỗi AI Analyze: {e}")
         acc = round(stats[weakest]["correct"] / stats[weakest]["done"] * 100)
-        message = f"Bạn đang yếu nhất ở {labels[weakest]} ({acc}%). Hãy luyện thêm!"
+        message = f"Bạn đang yếu nhất ở {labels.get(weakest, weakest)} ({acc}%). Hãy tập trung luyện thêm phần này nhé!"
 
     return {"message": message, "weakest": weakest}
 
+
+class GenerateReq(BaseModel):
+    stats: dict
+    mode: str 
+
+@app.post("/api/agent/generate")
+async def agent_generate_endpoint(req: GenerateReq):
+    """API: Gọi khi bấm 'Luyện tập cùng AI' để lấy 15 câu hỏi"""
+    stats = req.stats
+    mode = req.mode
+    labels = {"reading":"Reading", "grammar":"Grammar", "vocab":"Vocabulary", "listening":"Listening"}
+    mode_label = labels.get(mode, mode)
+    
+    # Tính toán trình độ
+    mode_stats = stats.get(mode, {"correct": 0, "done": 0})
+    acc = round((mode_stats["correct"] / mode_stats["done"]) * 100) if mode_stats["done"] > 0 else 0
+
+    # Phân loại độ khó Prompt
+    if acc < 40:
+        difficulty = "Beginner (A1-A2) - Từ vựng/ngữ pháp cơ bản, câu ngắn, dễ hiểu."
+    elif acc < 75:
+        difficulty = "Intermediate (B1-B2) - Câu hỏi có bẫy nhẹ, từ vựng thông dụng trong công việc."
+    else:
+        difficulty = "Advanced (C1-C2) - Ngữ pháp phức tạp, từ vựng học thuật cao, bẫy tinh vi."
+
+    try:
+        # Chạy Agent Generate
+        generated_data = await run_agent_generate(mode_label, acc, difficulty)
+        return {"questions": generated_data["questions"]}
+    except Exception as e:
+        print(f"Lỗi AI Generate: {e}")
+        raise HTTPException(status_code=500, detail="AI đang bận, không thể soạn câu hỏi. Thử lại sau nhé!")
 
 @app.post("/api/agent/session-result")
 async def session_result(req: SessionReq, user=Depends(get_current_user)):
@@ -291,3 +361,74 @@ async def get_sessions(user=Depends(require_user)):
         if "created_at" in d:
             d["created_at"] = d["created_at"].isoformat()
     return {"sessions": docs}
+
+@app.post("/api/flashcards/generate-from-image")
+async def generate_flashcards_from_image(file: UploadFile = File(...), user=Depends(get_current_user)):
+    try:
+        image_bytes = await file.read()
+        mime = file.content_type or "image/jpeg"
+        flashcards = await run_flashcard_generator(image_bytes, mime)
+    except Exception as e:
+        raise HTTPException(500, f"Lỗi tạo flashcard: {e}")
+    finally:
+        try:
+            await file.close()
+        except Exception:
+            pass
+    return {"flashcards": flashcards}
+
+
+@app.post("/api/flashcards/save")
+async def save_flashcard(flashcard: FlashcardDeck, user=Depends(get_current_user)):
+    try:
+        if user is not None:
+            await flashcards_col().insert_one({
+                "user_id":    user["_id"],
+                "cards": [card.model_dump() for card in flashcard.cards],
+                "deck_name": flashcard.deck_name,
+                # "word":       flashcard.word,
+                # "part_of_speech": flashcard.part_of_speech,
+                # "ipa":        flashcard.ipa,
+                # "meaning":    flashcard.meaning,
+                "created_at": datetime.now(timezone.utc),
+            })
+        else:
+            await flashcards_col().insert_one({
+                "cards": [card.model_dump() for card in flashcard.cards],
+                "deck_name": flashcard.deck_name,
+                })
+    except Exception as e:
+        raise HTTPException(500, f"Lỗi lưu flashcard: {e}")
+    return {"message": "Flashcard đã được lưu thành công."}
+
+
+@app.get("/api/flashcards") 
+async def get_my_flashcards(current_user_id: str):
+    try:
+        # In ra để xem frontend truyền lên id gì và collection có dữ liệu không
+        print("🔍 Đang tìm flashcard với current_user_id:", current_user_id)
+        
+        # Test thử lấy tất cả không điều kiện xem có ra 4 bộ không
+        all_docs = await flashcards_col().find().to_list(length=100)
+        print("📊 Tổng số bản ghi thực tế trong collection flashcards:", len(all_docs))
+        if len(all_docs) > 0:
+            print("💡 Tên trường chứa ID trong DB là:", list(all_docs[0].keys()))
+        cursor = flashcards_col().find({"user_id": current_user_id}).sort("created_at", -1)
+        
+        saved_decks = []
+        # SỬA Ở ĐÂY: Thêm chữ 'async' vào trước vòng lặp for
+        async for deck in cursor: 
+            deck["_id"] = str(deck["_id"])
+            
+            if "cards" in deck:
+                for card in deck["cards"]:
+                    if "_id" in card:
+                        card["_id"] = str(card["_id"])
+            
+            saved_decks.append(deck)
+            
+        return {"success": True, "data": saved_decks}
+        
+    except Exception as e:
+        print("Lỗi khi lấy dữ liệu:", e)
+        return {"success": False, "message": "Không thể tải kho Flashcard"}
