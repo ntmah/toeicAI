@@ -32,6 +32,9 @@ export const agentAPI = {
 
   // Agent
   analyze:       (stats)                => api.post('/agent/analyze', { stats }).then(r => r.data),
+  
+  // 👇 API MỚI THÊM VÀO ĐÂY NHÉ 👇
+  generate:      (stats, mode)          => api.post('/agent/generate', { stats, mode }).then(r => r.data),
   sessionResult: (mode, total, correct) => api.post('/agent/session-result', { mode, total, correct }).then(r => r.data),
 
   // Chat
@@ -51,4 +54,21 @@ export const agentAPI = {
 
   // Sessions
   getSessions: () => api.get('/sessions').then(r => r.data.sessions),
+
+  generateFlashcards: (file) => {
+    const formData = new FormData()
+    formData.append("file", file)
+    return api.post('/flashcards/generate-from-image', formData).then(r => r.data)
+  },
+  
+  saveFlashcards: (deckData) => 
+    api.post('/flashcards/save', deckData).then(r => r.data),
+
+  getSavedFlashcards: (current_user_id) => 
+  api.get(`/flashcards?current_user_id=${current_user_id}`).then(r => r.data),
+  getVocabHistory: (current_user_id) => 
+  api.get(`/vocab/history?current_user_id=${current_user_id}`).then(r => r.data),
 }
+
+
+
